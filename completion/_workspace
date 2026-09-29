@@ -1,0 +1,29 @@
+#compdef workspace ws
+
+_workspace_completions() {
+  local script="$(workspace_data_dir)/workspace.py"
+  echo "$($script --mode=zsh autocomplete_options --all $@)"
+}
+
+_workspace() {
+  local ret=1 state
+
+  _arguments \
+    ':subcommand:->subcommand' \
+    '*:: :->subcmds' && ret=0
+
+  case $state in
+    subcommand)
+      subcommands_str="$(_workspace_completions $state)"
+      subcommands=(${(s/,/)subcommands_str}) # Split result on commas
+      _describe -t 'subcommands' 'workspace subcommands' subcommands && ret=0 ;;
+    *)
+      completions=( $(_workspace_completions $words) )
+      _describe "" completions && ret=0 ;;
+  esac
+
+  return ret
+}
+
+# compdef _workspace workspace
+_workspace "$@"

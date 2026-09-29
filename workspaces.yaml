@@ -1,0 +1,9 @@
+workforest:
+ - name: "driving"
+   root: "/home/daniel/driving/"
+   root_checkout: "master"
+   source: "devx/shells/activate"
+
+ - name: "workspaces"
+   root: "/home/daniel/GitHub/workspaces/"
+   root_checkout: "main"
