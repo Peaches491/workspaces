@@ -15,7 +15,7 @@ import yaml
 
 log = logging.getLogger(__name__)
 
-WORKSPACES_FILE = "/home/daniel/dotfiles/config/files/workspace/workspaces.yaml"
+WORKSPACES_FILE = Path(__file__).resolve().parent / "workspaces.yaml"
 
 
 def base_arg_parser():
@@ -210,12 +210,14 @@ class SourceAction(Action):
             return load_forest(argv[0]).worktree_names()
 
     def _find_worktree_from_cwd(self, cwd):
+        matches = []
         for worktree in get_worktrees_from_dir(cwd):
             if is_subdir(cwd, worktree):
                 log.debug("YES: " + str(worktree))
-                return worktree
+                matches.append(worktree)
             else:
                 log.debug("NO:  " + str(worktree))
+        return max(matches, key=lambda w: len(Path(w).parts), default=None)
 
     def _get_forest_and_tree_from_cwd(self):
         cwd = Path(os.getcwd())
@@ -223,18 +225,11 @@ class SourceAction(Action):
         if not worktree_path:
             return None
 
-        forests = load_forests()
-        forest = next((f for f in forests if is_subdir(cwd, f.root_)), None)
-        if not forest:
-            return None
-
-        wt_path = Path(worktree_path)
-        forest_path = Path(forest.root_)
-        worktree_name = str(
-            Path(os.path.join(*wt_path.parts[len(forest_path.parts) :]))
-        )
-
-        return forest, forest.worktree(worktree_name)
+        for forest in load_forests():
+            tree = forest.worktree_at_path(worktree_path)
+            if tree:
+                return forest, tree
+        return None
 
     def do(self, args):
         cmd = []
@@ -253,10 +248,12 @@ class SourceAction(Action):
             f"builtin cd {tree.root()};",
             "tmux rename-window \"$(git symbolic-ref HEAD | sed 's#^refs/heads/##')\" | true;",
             ]
-        if forest.source_script():
+        for source_file in tree.source_files():
             cmd += [
-                f"echo 'Sourcing workspace [{tree.name}]: {forest.source_script()}';",
-                f"source '{tree.source_file()}';",
+                f"if [ -f '{source_file}' ]; then",
+                f"  echo 'Sourcing workspace [{tree.name}]: {source_file}';",
+                f"  source '{source_file}';",
+                "fi",
             ]
         cmd += [
             "echo -n 'Adding ssh-agent... '; ssh_agent_canonicalize",
@@ -315,38 +312,80 @@ class ListAction(Action):
         return f"echo '{matches_str}'"
 
 
+def as_list(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return list(value)
+
+
 class WorkTree(object):
-    def __init__(self, parent, name):
+    def __init__(self, parent, name, path):
         self.parent = parent
         self.name = name
+        self.path = path
 
     def root(self):
-        return os.path.join(self.parent.root_, self.name)
+        return self.path
 
-    def source_file(self):
-        return os.path.join(self.root(), self.parent.source_script())
+    def source_files(self):
+        return [os.path.join(self.root(), script) for script in self.parent.source_scripts()]
 
 
 class WorkForest(object):
     def __init__(self, body):
         self.name = body["name"]
-        self.root_ = body["root"]
-        self.root_checkout = body["root_checkout"]
-        self.source_ = body.setdefault("source", None)
+        self.roots_ = as_list(body["root"])
+        self.root_checkout = body.get("root_checkout")
+        self.source_ = as_list(body.get("source"))
 
         self.worktrees_ = dict()
+        self.worktrees_by_path_ = dict()
 
         self._find_worktrees()
 
-    @functools.lru_cache()
+    def _git_dirs(self):
+        if self.root_checkout:
+            return [self.root_checkout_dir()]
+        return [r for r in self.roots_ if os.path.isdir(r)]
+
+    def _discover_worktree_paths(self):
+        paths = []
+        for git_dir in self._git_dirs():
+            try:
+                for worktree in get_worktrees_from_dir(git_dir):
+                    if worktree not in paths:
+                        paths.append(worktree)
+            except subprocess.CalledProcessError:
+                log.warning(f"Unable to list worktrees from: {git_dir}")
+        return paths
+
+    def _owning_root(self, path):
+        containing = [r for r in self.roots_ if is_subdir(path, r)]
+        return max(containing, key=lambda r: len(Path(r).parts), default=None)
+
     def _find_worktrees(self):
-        for worktree in get_worktrees_from_dir(self.root_checkout_dir()):
-            tree_name = os.path.relpath(worktree, self.root_)
-            self.add_worktree(tree_name)
+        by_root = {r: [] for r in self.roots_}
+        for path in self._discover_worktree_paths():
+            root = self._owning_root(path)
+            if root is not None:
+                by_root[root].append(path)
+
+        for root in self.roots_:
+            for path in by_root[root]:
+                name = os.path.relpath(path, root)
+                tree = WorkTree(self, name, path)
+                self.worktrees_by_path_[os.path.normpath(path)] = tree
+                if name in self.worktrees_:
+                    log.debug(f"Worktree name collision, keeping first: {name}")
+                    continue
+                self.worktrees_[name] = tree
 
     def add_worktree(self, name):
         log.debug(f"Adding worktree: {name}")
-        self.worktrees_[name] = WorkTree(self, name)
+        path = os.path.join(self.roots_[0], name)
+        self.worktrees_[name] = WorkTree(self, name, path)
         return self.worktrees_[name]
 
     def worktree_names(self):
@@ -355,10 +394,15 @@ class WorkForest(object):
     def worktree(self, worktree):
         return self.worktrees_[worktree]
 
-    def root_checkout_dir(self):
-        return os.path.join(self.root_, self.root_checkout)
+    def worktree_at_path(self, path):
+        return self.worktrees_by_path_.get(os.path.normpath(path))
 
-    def source_script(self):
+    def root_checkout_dir(self):
+        if self.root_checkout:
+            return os.path.join(self.roots_[0], self.root_checkout)
+        return self.roots_[0]
+
+    def source_scripts(self):
         return self.source_
 
 

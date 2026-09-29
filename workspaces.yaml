@@ -1,8 +1,12 @@
 workforest:
  - name: "driving"
-   root: "/home/daniel/driving/"
+   root:
+    - "/home/daniel/driving/"
+    - "/home/daniel/driving/master/.claude/worktrees/"
    root_checkout: "master"
-   source: "devx/shells/activate"
+   source:
+    - "devx/shells/activate"
+    - "mapping/atlas/workflows/scripts/shell_activate.sh"
 
  - name: "workspaces"
    root: "/home/daniel/GitHub/workspaces/"
